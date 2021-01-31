@@ -6,26 +6,28 @@ edition = "2018"
 
 [dependencies]
 # Substrate dependencies
-sc-service = { git = "https://github.com/paritytech/substrate", branch = "rococo-branch", optional = true }
-sp-inherents = { git = "https://github.com/paritytech/substrate", branch = "rococo-branch", default-features = false }
-sp-std = { git = "https://github.com/paritytech/substrate", branch = "rococo-branch", default-features = false }
-sp-runtime = { git = "https://github.com/paritytech/substrate", branch = "rococo-branch", default-features = false }
+sp-inherents = { git = "https://github.com/paritytech/substrate", default-features = false, branch = "master" }
+sp-std = { git = "https://github.com/paritytech/substrate", default-features = false, branch = "master" }
+sp-runtime = { git = "https://github.com/paritytech/substrate", default-features = false, branch = "master" }
+sc-chain-spec = { git = "https://github.com/paritytech/substrate", optional = true, branch = "master" }
+sp-core = { git = "https://github.com/paritytech/substrate", default-features = false, branch = "master" }
+sp-trie = { git = "https://github.com/paritytech/substrate", default-features = false, branch = "master" }
 
 # Polkadot dependencies
-polkadot-parachain = { git = "https://github.com/paritytech/polkadot", branch = "rococo-branch", default-features = false }
-polkadot-primitives = { git = "https://github.com/paritytech/polkadot", branch = "rococo-branch", default-features = false }
+polkadot-parachain = { git = "https://github.com/paritytech/polkadot", default-features = false, branch = "master" }
+polkadot-primitives = { git = "https://github.com/paritytech/polkadot", default-features = false, branch = "master" }
 
 # Other dependencies
-codec = { package = "parity-scale-codec", version = "1.0.5", default-features = false, features = [ "derive" ] }
+codec = { package = "parity-scale-codec", version = "2.0.0", default-features = false, features = [ "derive" ] }
 impl-trait-for-tuples = "0.1.3"
 
 # Polkadot dependencies
-polkadot-core-primitives = { git = "https://github.com/paritytech/polkadot", branch = "rococo-branch", default-features = false }
+polkadot-core-primitives = { git = "https://github.com/paritytech/polkadot", default-features = false, branch = "master" }
 
 [features]
 default = [ "std" ]
 std = [
-	"sc-service",
+	"sc-chain-spec",
 	"sp-std/std",
 	"codec/std",
 	"polkadot-primitives/std",
@@ -33,4 +35,6 @@ std = [
 	"sp-inherents/std",
 	"polkadot-core-primitives/std",
 	"sp-runtime/std",
+	"sp-core/std",
+	"sp-trie/std",
 ]

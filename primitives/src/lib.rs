@@ -18,54 +18,83 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-pub use polkadot_core_primitives as relay_chain;
-pub use polkadot_core_primitives::DownwardMessage;
-/// A generic upward message from a Parachain to the Relay Chain.
-///
-/// It is "generic" in such a way, that the actual message is encoded in the `data` field.
-/// Besides the `data` it also holds the `origin` of the message.
-pub use polkadot_parachain::primitives::UpwardMessage as GenericUpwardMessage;
-pub use polkadot_parachain::primitives::{
-	Id as ParaId, ParachainDispatchOrigin as UpwardMessageOrigin,
+pub use polkadot_core_primitives::InboundDownwardMessage;
+pub use polkadot_parachain::primitives::{Id as ParaId, UpwardMessage, ValidationParams};
+pub use polkadot_primitives::v1::{
+	PersistedValidationData, AbridgedHostConfiguration, AbridgedHrmpChannel,
 };
 
 #[cfg(feature = "std")]
 pub mod genesis;
-pub mod validation_function_params;
-pub mod xcmp;
 
-use codec::{Decode, Encode};
-use sp_runtime::traits::Block as BlockT;
+/// A module that re-exports relevant relay chain definitions.
+pub mod relay_chain {
+	pub use polkadot_core_primitives::*;
+	pub use polkadot_primitives::v1;
+	pub use polkadot_primitives::v1::well_known_keys;
+}
+
+/// An inbound HRMP message.
+pub type InboundHrmpMessage = polkadot_primitives::v1::InboundHrmpMessage<relay_chain::BlockNumber>;
+
+/// And outbound HRMP message
+pub type OutboundHrmpMessage = polkadot_primitives::v1::OutboundHrmpMessage<ParaId>;
 
 /// Identifiers and types related to Cumulus Inherents
 pub mod inherents {
+	use super::{InboundDownwardMessage, InboundHrmpMessage, ParaId};
 	use sp_inherents::InherentIdentifier;
+	use sp_std::{collections::btree_map::BTreeMap, vec::Vec};
 
-	/// Inherent identifier for downward messages.
-	pub const DOWNWARD_MESSAGES_IDENTIFIER: InherentIdentifier = *b"cumdownm";
+	/// The identifier for the parachain-system inherent.
+	pub const SYSTEM_INHERENT_IDENTIFIER: InherentIdentifier = *b"sysi1337";
 
-	/// The type of the inherent downward messages.
-	pub type DownwardMessagesType = sp_std::vec::Vec<crate::DownwardMessage>;
-
-	/// The identifier for the `validation_function_params` inherent.
-	pub const VALIDATION_FUNCTION_PARAMS_IDENTIFIER: InherentIdentifier = *b"valfunp0";
-	/// The type of the inherent.
-	pub type ValidationFunctionParamsType =
-		crate::validation_function_params::ValidationFunctionParams;
+	/// The payload that system inherent carries.
+	#[derive(codec::Encode, codec::Decode, sp_core::RuntimeDebug, Clone, PartialEq)]
+	pub struct SystemInherentData {
+		pub validation_data: crate::PersistedValidationData,
+		/// A storage proof of a predefined set of keys from the relay-chain.
+		///
+		/// Specifically this witness contains the data for:
+		///
+		/// - active host configuration as per the relay parent,
+		/// - the relay dispatch queue sizes
+		/// - the list of egress HRMP channels (in the list of recipients form)
+		/// - the metadata for the egress HRMP channels
+		pub relay_chain_state: sp_trie::StorageProof,
+		/// Downward messages in the order they were sent.
+		pub downward_messages: Vec<InboundDownwardMessage>,
+		/// HRMP messages grouped by channels. The messages in the inner vec must be in order they
+		/// were sent. In combination with the rule of no more than one message in a channel per block,
+		/// this means `sent_at` is **strictly** greater than the previous one (if any).
+		pub horizontal_messages: BTreeMap<ParaId, Vec<InboundHrmpMessage>>,
+	}
 }
 
 /// Well known keys for values in the storage.
 pub mod well_known_keys {
 	/// The storage key for the upward messages.
 	///
-	/// The upward messages are stored as SCALE encoded `Vec<GenericUpwardMessage>`.
+	/// The upward messages are stored as SCALE encoded `Vec<UpwardMessage>`.
 	pub const UPWARD_MESSAGES: &'static [u8] = b":cumulus_upward_messages:";
 
-	/// Current validation function parameters.
-	pub const VALIDATION_FUNCTION_PARAMS: &'static [u8] = b":cumulus_validation_function_params";
+	/// Current validation data.
+	pub const VALIDATION_DATA: &'static [u8] = b":cumulus_validation_data:";
 
 	/// Code upgarde (set as appropriate by a pallet).
-	pub const NEW_VALIDATION_CODE: &'static [u8] = b":cumulus_new_validation_code";
+	pub const NEW_VALIDATION_CODE: &'static [u8] = b":cumulus_new_validation_code:";
+
+	/// The storage key with which the runtime passes outbound HRMP messages it wants to send to the
+	/// PVF.
+	///
+	/// The value is stored as SCALE encoded `Vec<OutboundHrmpMessage>`
+	pub const HRMP_OUTBOUND_MESSAGES: &'static [u8] = b":cumulus_hrmp_outbound_messages:";
+
+	/// The storage key for communicating the HRMP watermark from the runtime to the PVF. Cleared by
+	/// the runtime each block and set after message inclusion, but only if there were messages.
+	///
+	/// The value is stored as SCALE encoded relay-chain's `BlockNumber`.
+	pub const HRMP_WATERMARK: &'static [u8] = b":cumulus_hrmp_watermark:";
 
 	/// The storage key for the processed downward messages.
 	///
@@ -77,19 +106,30 @@ pub mod well_known_keys {
 #[impl_trait_for_tuples::impl_for_tuples(30)]
 pub trait DownwardMessageHandler {
 	/// Handle the given downward message.
-	fn handle_downward_message(msg: &DownwardMessage);
+	fn handle_downward_message(msg: InboundDownwardMessage);
 }
 
-/// Something that can send upward messages.
-pub trait UpwardMessageSender<UpwardMessage> {
-	/// Send an upward message to the relay chain.
-	///
-	/// Returns an error if sending failed.
-	fn send_upward_message(msg: &UpwardMessage, origin: UpwardMessageOrigin) -> Result<(), ()>;
+/// Something that should be called when an HRMP message is received.
+#[impl_trait_for_tuples::impl_for_tuples(30)]
+pub trait HrmpMessageHandler {
+	/// Handle the given HRMP message.
+	fn handle_hrmp_message(sender: ParaId, msg: InboundHrmpMessage);
 }
 
-/// The head data of the parachain, stored in the relay chain.
-#[derive(Decode, Encode, Debug)]
-pub struct HeadData<Block: BlockT> {
-	pub header: Block::Header,
+/// Something that should be called when sending an upward message.
+pub trait UpwardMessageSender {
+	/// Send the given upward message.
+	fn send_upward_message(msg: UpwardMessage) -> Result<(), ()>;
+}
+
+/// Something that should be called when sending an HRMP message.
+pub trait HrmpMessageSender {
+	/// Send the given HRMP message.
+	fn send_hrmp_message(msg: OutboundHrmpMessage) -> Result<(), ()>;
+}
+
+/// A trait which is called when the validation data is set.
+#[impl_trait_for_tuples::impl_for_tuples(30)]
+pub trait OnValidationData {
+	fn on_validation_data(data: PersistedValidationData);
 }

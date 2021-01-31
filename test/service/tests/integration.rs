@@ -21,38 +21,38 @@ use sc_service::TaskExecutor;
 use substrate_test_runtime_client::AccountKeyring::*;
 
 #[substrate_test_utils::test]
-#[ignore]
 async fn test_collating_and_non_collator_mode_catching_up(task_executor: TaskExecutor) {
+	let mut builder = sc_cli::LoggerBuilder::new("");
+	builder.with_colors(false);
+	let _ = builder.init();
+
 	let para_id = ParaId::from(100);
 
 	// start alice
-	let alice = polkadot_test_service::run_test_node(task_executor.clone(), Alice, || {}, vec![]);
+	let alice =
+		polkadot_test_service::run_validator_node(task_executor.clone(), Alice, || {}, vec![]);
 
 	// start bob
-	let bob = polkadot_test_service::run_test_node(
+	let bob = polkadot_test_service::run_validator_node(
 		task_executor.clone(),
 		Bob,
 		|| {},
 		vec![alice.addr.clone()],
 	);
 
-	// ensure alice and bob can produce blocks
-	join!(alice.wait_for_blocks(2), bob.wait_for_blocks(2));
-
 	// register parachain
 	alice
-		.register_para(
+		.register_parachain(
 			para_id,
 			cumulus_test_runtime::WASM_BINARY
 				.expect("You need to build the WASM binary to run this test!")
-				.to_vec()
-				.into(),
+				.to_vec(),
 			initial_head_data(para_id),
 		)
 		.await
 		.unwrap();
 
-	// run cumulus charlie (a validator)
+	// run cumulus charlie (a parachain collator)
 	let charlie = cumulus_test_service::run_test_node(
 		task_executor.clone(),
 		Charlie,
@@ -62,13 +62,11 @@ async fn test_collating_and_non_collator_mode_catching_up(task_executor: TaskExe
 		vec![alice.addr.clone(), bob.addr.clone()],
 		para_id,
 		true,
-	);
-	charlie.wait_for_blocks(2).await;
+	)
+	.await;
+	charlie.wait_for_blocks(5).await;
 
-	// run cumulus dave (not a validator)
-	//
-	// a collator running in non-validator mode should be able to sync blocks from the tip of the
-	// parachain
+	// run cumulus dave (a parachain full node) and wait for it to sync some blocks
 	let dave = cumulus_test_service::run_test_node(
 		task_executor.clone(),
 		Dave,
@@ -78,8 +76,9 @@ async fn test_collating_and_non_collator_mode_catching_up(task_executor: TaskExe
 		vec![alice.addr.clone(), bob.addr.clone()],
 		para_id,
 		false,
-	);
-	dave.wait_for_blocks(4).await;
+	)
+	.await;
+	dave.wait_for_blocks(7).await;
 
 	join!(
 		alice.task_manager.clean_shutdown(),

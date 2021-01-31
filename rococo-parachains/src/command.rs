@@ -24,13 +24,16 @@ use log::info;
 use parachain_runtime::Block;
 use polkadot_parachain::primitives::AccountIdConversion;
 use sc_cli::{
-	ChainSpec, CliConfiguration, DefaultConfigurationValues, ImportParams, KeystoreParams,
-	NetworkParams, Result, RuntimeVersion, SharedParams, SubstrateCli,
+	ChainSpec, CliConfiguration, DefaultConfigurationValues, ImportParams,
+	KeystoreParams, NetworkParams, Result, RuntimeVersion, SharedParams, SubstrateCli,
 };
-use sc_service::config::{BasePath, PrometheusConfig};
+use sc_service::{
+	config::{BasePath, PrometheusConfig},
+	PartialComponents,
+};
 use sp_core::hexdisplay::HexDisplay;
 use sp_runtime::traits::Block as BlockT;
-use std::{io::Write, net::SocketAddr, sync::Arc};
+use std::{io::Write, net::SocketAddr};
 
 fn load_spec(
 	id: &str,
@@ -47,7 +50,6 @@ fn load_spec(
 		"track" => Ok(Box::new(chain_spec::ChainSpec::from_json_bytes(
 			&include_bytes!("../res/track.json")[..],
 		)?)),
-		"contracts" => Ok(Box::new(chain_spec::get_contracts_chain_spec(para_id))),
 		"" => Ok(Box::new(chain_spec::get_chain_spec(para_id))),
 		path => Ok(Box::new(chain_spec::ChainSpec::from_json_file(
 			path.into(),
@@ -143,75 +145,118 @@ fn extract_genesis_wasm(chain_spec: &Box<dyn sc_service::ChainSpec>) -> Result<V
 		.ok_or_else(|| "Could not find wasm file in genesis state!".into())
 }
 
-fn use_contracts_runtime(chain_spec: &Box<dyn ChainSpec>) -> bool {
-	chain_spec.id().starts_with("trick") || chain_spec.id().starts_with("contracts")
-}
-
 /// Parse command line arguments into service configuration.
 pub fn run() -> Result<()> {
 	let cli = Cli::from_args();
 
 	match &cli.subcommand {
-		Some(Subcommand::Base(subcommand)) => {
-			let runner = cli.create_runner(subcommand)?;
-
-			if use_contracts_runtime(&runner.config().chain_spec) {
-				runner.run_subcommand(subcommand, |mut config| {
-					let params = crate::service::new_partial::<
-						parachain_contracts_runtime::RuntimeApi,
-						crate::service::ContractsRuntimeExecutor,
-					>(&mut config)?;
-
-					Ok((
-						params.client,
-						params.backend,
-						params.import_queue,
-						params.task_manager,
-					))
-				})
-			} else {
-				runner.run_subcommand(subcommand, |mut config| {
-					let params = crate::service::new_partial::<
-						parachain_runtime::RuntimeApi,
-						crate::service::RuntimeExecutor,
-					>(&mut config)?;
-
-					Ok((
-						params.client,
-						params.backend,
-						params.import_queue,
-						params.task_manager,
-					))
-				})
-			}
+		Some(Subcommand::BuildSpec(cmd)) => {
+			let runner = cli.create_runner(cmd)?;
+			runner.sync_run(|config| cmd.run(config.chain_spec, config.network))
+		}
+		Some(Subcommand::CheckBlock(cmd)) => {
+			let runner = cli.create_runner(cmd)?;
+			runner.async_run(|config| {
+				let PartialComponents {
+					client,
+					task_manager,
+					import_queue,
+					..
+				} = crate::service::new_partial(&config)?;
+				Ok((cmd.run(client, import_queue), task_manager))
+			})
+		}
+		Some(Subcommand::ExportBlocks(cmd)) => {
+			let runner = cli.create_runner(cmd)?;
+			runner.async_run(|config| {
+				let PartialComponents {
+					client,
+					task_manager,
+					..
+				} = crate::service::new_partial(&config)?;
+				Ok((cmd.run(client, config.database), task_manager))
+			})
+		}
+		Some(Subcommand::ExportState(cmd)) => {
+			let runner = cli.create_runner(cmd)?;
+			runner.async_run(|config| {
+				let PartialComponents {
+					client,
+					task_manager,
+					..
+				} = crate::service::new_partial(&config)?;
+				Ok((cmd.run(client, config.chain_spec), task_manager))
+			})
+		}
+		Some(Subcommand::ImportBlocks(cmd)) => {
+			let runner = cli.create_runner(cmd)?;
+			runner.async_run(|config| {
+				let PartialComponents {
+					client,
+					task_manager,
+					import_queue,
+					..
+				} = crate::service::new_partial(&config)?;
+				Ok((cmd.run(client, import_queue), task_manager))
+			})
+		}
+		Some(Subcommand::PurgeChain(cmd)) => {
+			let runner = cli.create_runner(cmd)?;
+			runner.sync_run(|config| cmd.run(config.database))
+		}
+		Some(Subcommand::Revert(cmd)) => {
+			let runner = cli.create_runner(cmd)?;
+			runner.async_run(|config| {
+				let PartialComponents {
+					client,
+					task_manager,
+					backend,
+					..
+				} = crate::service::new_partial(&config)?;
+				Ok((cmd.run(client, backend), task_manager))
+			})
 		}
 		Some(Subcommand::ExportGenesisState(params)) => {
-			sc_cli::init_logger("");
+			let mut builder = sc_cli::LoggerBuilder::new("");
+			builder.with_profiling(sc_tracing::TracingReceiver::Log, "");
+			let _ = builder.init();
 
 			let block: Block = generate_genesis_block(&load_spec(
 				&params.chain.clone().unwrap_or_default(),
 				params.parachain_id.into(),
 			)?)?;
-			let header_hex = format!("0x{:?}", HexDisplay::from(&block.header().encode()));
+			let raw_header = block.header().encode();
+			let output_buf = if params.raw {
+				raw_header
+			} else {
+				format!("0x{:?}", HexDisplay::from(&block.header().encode())).into_bytes()
+			};
 
 			if let Some(output) = &params.output {
-				std::fs::write(output, header_hex)?;
+				std::fs::write(output, output_buf)?;
 			} else {
-				print!("{}", header_hex);
+				std::io::stdout().write_all(&output_buf)?;
 			}
 
 			Ok(())
 		}
 		Some(Subcommand::ExportGenesisWasm(params)) => {
-			sc_cli::init_logger("");
+			let mut builder = sc_cli::LoggerBuilder::new("");
+			builder.with_profiling(sc_tracing::TracingReceiver::Log, "");
+			let _ = builder.init();
 
-			let wasm_file =
+			let raw_wasm_blob =
 				extract_genesis_wasm(&cli.load_spec(&params.chain.clone().unwrap_or_default())?)?;
+			let output_buf = if params.raw {
+				raw_wasm_blob
+			} else {
+				format!("0x{:?}", HexDisplay::from(&raw_wasm_blob)).into_bytes()
+			};
 
 			if let Some(output) = &params.output {
-				std::fs::write(output, wasm_file)?;
+				std::fs::write(output, output_buf)?;
 			} else {
-				std::io::stdout().write_all(&wasm_file)?;
+				std::io::stdout().write_all(&output_buf)?;
 			}
 
 			Ok(())
@@ -219,11 +264,11 @@ pub fn run() -> Result<()> {
 		None => {
 			let runner = cli.create_runner(&*cli.run)?;
 
-			runner.run_node_until_exit(|config| {
+			runner.run_node_until_exit(|config| async move {
 				// TODO
-				let key = Arc::new(sp_core::Pair::generate().0);
+				let key = sp_core::Pair::generate().0;
 
-				let extension = chain_spec::Extensions::try_get(&config.chain_spec);
+				let extension = chain_spec::Extensions::try_get(&*config.chain_spec);
 				let relay_chain_id = extension.map(|e| e.relay_chain.clone());
 				let para_id = extension.map(|e| e.para_id);
 
@@ -245,37 +290,23 @@ pub fn run() -> Result<()> {
 				let genesis_state = format!("0x{:?}", HexDisplay::from(&block.header().encode()));
 
 				let task_executor = config.task_executor.clone();
-				let polkadot_config =
-					SubstrateCli::create_configuration(&polkadot_cli, &polkadot_cli, task_executor)
-						.map_err(|err| format!("Relay chain argument error: {}", err))?;
+				let polkadot_config = SubstrateCli::create_configuration(
+						&polkadot_cli,
+						&polkadot_cli,
+						task_executor,
+						config.telemetry_handle.clone(),
+					).map_err(|err| format!("Relay chain argument error: {}", err))?;
 				let collator = cli.run.base.validator || cli.collator;
 
 				info!("Parachain id: {:?}", id);
 				info!("Parachain Account: {}", parachain_account);
 				info!("Parachain genesis state: {}", genesis_state);
-				info!(
-					"Is collating: {}",
-					if collator { "yes" } else { "no" }
-				);
+				info!("Is collating: {}", if collator { "yes" } else { "no" });
 
-				if use_contracts_runtime(&config.chain_spec) {
-					crate::service::start_contracts_node(
-						config,
-						key,
-						polkadot_config,
-						id,
-						collator,
-					)
-				} else {
-					crate::service::start_node(
-						config,
-						key,
-						polkadot_config,
-						id,
-						collator,
-					)
+				crate::service::start_node(config, key, polkadot_config, id, collator)
+					.await
 					.map(|r| r.0)
-				}
+					.map_err(Into::into)
 			})
 		}
 	}
@@ -339,7 +370,7 @@ impl CliConfiguration<Self> for RelayChainCli {
 		self.base.base.prometheus_config(default_listen_port)
 	}
 
-	fn init<C: SubstrateCli>(&self) -> Result<()> {
+	fn init<C: SubstrateCli>(&self) -> Result<sc_telemetry::TelemetryWorker> {
 		unreachable!("PolkadotCli is never initialized; qed");
 	}
 
@@ -399,5 +430,12 @@ impl CliConfiguration<Self> for RelayChainCli {
 
 	fn announce_block(&self) -> Result<bool> {
 		self.base.base.announce_block()
+	}
+
+	fn telemetry_endpoints(
+		&self,
+		chain_spec: &Box<dyn ChainSpec>,
+	) -> Result<Option<sc_telemetry::TelemetryEndpoints>> {
+		self.base.base.telemetry_endpoints(chain_spec)
 	}
 }
